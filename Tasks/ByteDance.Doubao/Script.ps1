@@ -1,7 +1,8 @@
 $Object1 = Invoke-RestMethod -Uri 'https://www.doubao.com/service/settings/v3/?device_platform=web&brand=doubao&aid=582478'
 
 # Version
-$this.CurrentState.Version = $Object1.data.settings.saman_update_address.version
+# TargetVersion lets a run resubmit a version that is already published instead of the detected one
+$this.CurrentState.Version = $Global:DumplingsPreference['TargetVersion'] ?? $Object1.data.settings.saman_update_address.version
 
 # Installer
 $this.CurrentState.Installer += [ordered]@{
@@ -17,10 +18,13 @@ switch -Regex ($this.Check()) {
   'New|Changed|Updated' {
     try {
       # ReleaseNotes (zh-CN)
-      $this.CurrentState.Locale += [ordered]@{
-        Locale = 'zh-CN'
-        Key    = 'ReleaseNotes'
-        Value  = $Object1.data.settings.saman_update_address.release_note
+      # The release note belongs to the detected version, so it is skipped when another version is targeted
+      if (-not $Global:DumplingsPreference['TargetVersion']) {
+        $this.CurrentState.Locale += [ordered]@{
+          Locale = 'zh-CN'
+          Key    = 'ReleaseNotes'
+          Value  = $Object1.data.settings.saman_update_address.release_note
+        }
       }
     } catch {
       $_ | Out-Host
