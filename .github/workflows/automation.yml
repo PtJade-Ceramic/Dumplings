@@ -109,8 +109,8 @@ jobs:
   deploy:
     name: Deploy status page
     needs: build
-    # Deploy the status page even when the task run failed; skip only on cancellation
-    if: ${{ !cancelled() }}
+    # GitHub Pages is not enabled in this fork and the status page is not needed here
+    if: false
     runs-on: ubuntu-latest
     permissions:
       actions: read
