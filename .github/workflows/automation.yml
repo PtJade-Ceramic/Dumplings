@@ -23,6 +23,14 @@ jobs:
         with:
           path: Dumplings
           submodules: true
+      - name: Use this fork's PackageModule revision
+        # The root repository still points at the upstream PackageModule commit, so the revision under test
+        # is checked out on top of it. Only this fork branch needs this step.
+        run: |
+          git -C Modules/PackageModule fetch --depth 1 https://github.com/PtJade-Ceramic/Dumplings.PackageModule refs/heads/feature/use-existing-version-as-reference
+          git -C Modules/PackageModule checkout --detach FETCH_HEAD
+        working-directory: Dumplings
+        shell: pwsh
       # - name: Checkout upstream winget-pkgs
       #   uses: actions/checkout@v4
       #   with:
