@@ -1,7 +1,8 @@
 name: Automation
+
+# This fork never runs on a schedule: a scheduled run would execute every task and open pull requests
+# against microsoft/winget-pkgs from this account. Runs are started by hand instead.
 on:
-  schedule:
-    - cron: 0 * * * *
   workflow_dispatch:
     inputs:
       params:
@@ -12,6 +13,8 @@ jobs:
   build:
     name: Build
     runs-on: windows-2025
+    permissions:
+      contents: write
     concurrency:
       group: ${{ github.workflow }}
     steps:
@@ -46,7 +49,9 @@ jobs:
           cache-path: ${{ runner.temp }}\DumplingsPlaywrightRuntime
           cache-key: dumplings-playwright-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Dumplings/Modules/PackageModule/Assets/PlaywrightRuntime.psd1') }}
       - name: Run tasks
-        run: .\Core\Index.ps1 -ThrottleLimit 4 -EnableWrite -EnableMessage -EnableSubmit ${{ github.event.inputs.params }}
+        # No -EnableWrite and no -EnableMessage in this fork: a run only generates and submits manifests,
+        # it never records task state or sends notifications.
+        run: .\Core\Index.ps1 -ThrottleLimit 4 -EnableSubmit ${{ github.event.inputs.params }}
         working-directory: Dumplings
         shell: pwsh
         env:
@@ -94,6 +99,13 @@ jobs:
           path: Dumplings/Outputs/Status
           retention-days: 1
           if-no-files-found: error
+      - name: Upload the generated manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: winget-manifests
+          path: Dumplings/Outputs/WinGet
+          if-no-files-found: warn
   deploy:
     name: Deploy status page
     needs: build
