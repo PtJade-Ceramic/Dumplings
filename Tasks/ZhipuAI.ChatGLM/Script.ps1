@@ -136,12 +136,14 @@ public static class ChatGLMInstallerLanguage
                           @($Model.Localizations) | ForEach-Object { $ByLocale[[string]$_['PackageLocale']] = $_ }
                           $PromotedDefault = $ByLocale[$Fact.Language]
                           if (-not $PromotedDefault) { throw "${_}: no $($Fact.Language) localization in the set" }
-                          # Publisher and Author are only left untouched while the installer evidence still
-                          # matches the manifest; should either change, stop so the attribution is
-                          # revisited instead of silently kept.
+                          # The installer declares the attribution: its company name backs Publisher and its
+                          # signer legal name backs Author. A published manifest of a rewritten version can
+                          # still record a superseded legal name, so adopt the installer value instead of
+                          # keeping the stale one; the log line marks the change.
                           foreach ($Field in 'Publisher', 'Author') {
                             if ($PromotedDefault[$Field] -and $Fact.$Field -and $PromotedDefault[$Field] -ne $Fact.$Field) {
-                              throw "${_}: installer $Field '$($Fact.$Field)' no longer matches manifest $Field '$($PromotedDefault[$Field])'"
+                              Write-Log -Object "${_}: adopting the installer $Field '$($Fact.$Field)' over the published $Field '$($PromotedDefault[$Field])'"
+                              $PromotedDefault[$Field] = $Fact.$Field
                             }
                           }
 
