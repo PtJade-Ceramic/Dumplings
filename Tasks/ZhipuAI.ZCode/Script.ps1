@@ -32,86 +32,47 @@ $Global:DumplingsPreference['TargetVersion'] | ForEach-Object {
       foreach ($Model in $RawManifests | ConvertFrom-WinGetManifestYaml) {
         foreach ($ReferenceRoot in Join-Path $env:TEMP ("zcode-reference-" + [guid]::NewGuid().ToString('N'))) {
           foreach ($SourcePath in (, @('Identifier', 'Version' | ForEach-Object { $Model."Package$_" }) | ForEach-Object { Get-WinGetLocalPackagePath @_ -RootPath (Join-Path $ReferenceRoot 'manifests') })) {
-            # The installer is downloaded here because the manifest records its hash, not its
-            # metadata; the hash check keeps the evidence tied to the published package.
-            foreach ($InstallerRoot in Join-Path $env:TEMP ("zcode-installer-" + [guid]::NewGuid().ToString('N'))) {
-              $null = New-Item -Path $InstallerRoot -ItemType Directory -Force
-              $InstallerEntry = @($Model.Installers)[0]
-              if (-not $InstallerEntry) { throw "${TargetVersion}: manifest declares no installer" }
-              foreach ($InstallerUrl in [string]$InstallerEntry['InstallerUrl']) {
-                foreach ($InstallerPath in Join-Path $InstallerRoot (($InstallerUrl -split '/')[-1] -split '\?')[0]) {
-                  Invoke-WebRequest $InstallerUrl -OutFile $InstallerPath
-                  # Locate the installer whose SHA256 matches the hash recorded in the manifest, so
-                  # the evidence is bound to the exact package the manifest references, then read
-                  # its PE VersionInfo and its Authenticode signer.
-                  foreach ($Expected in [string]$InstallerEntry['InstallerSha256'].ToUpperInvariant()) {
-                    (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash | ForEach-Object { if ($_ -ne $Expected) { throw "${TargetVersion}: downloaded installer hash $_ does not match InstallerSha256 $Expected" } }
-                    $Match = Get-ChildItem -LiteralPath $InstallerRoot -Filter *.exe -File -ErrorAction SilentlyContinue | Where-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash -eq $Expected } | Select-Object -First 1
-                    if (-not $Match) { throw "${TargetVersion}: no installer under '$InstallerRoot' matches InstallerSha256 $Expected" }
-                    foreach (
-                      $Fact in & {
-                        $Fact = [ordered]@{
-                          Path = $Match.FullName
-                        }
-                        $Match.VersionInfo | ForEach-Object {
-                          $Fact.LegalCopyright = $_.LegalCopyright
-                          # Named after the manifest field it backs: CompanyName is the Add/Remove
-                          # Programs Publisher. This package does not declare one.
-                          $Fact.Publisher = $_.CompanyName
-                        }
-                        Get-AuthenticodeSignature -LiteralPath $Match.FullName | ForEach-Object {
-                          $Fact.SignatureStatus = $_.Status
-                          $Fact.Author = ($_.SignerCertificate ? $_.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) : $null)
-                        }
-                        $Fact
-                      }
-                    ) {
-                      # Derived from the object itself, so a fact is added or renamed in one place only.
-                      Write-Log -Object ("installer: $(($Fact.GetEnumerator() | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join ' ')")
+            # The installer evidence is read through the shared helper: the manifest records the
+            # installer's hash, not its metadata, and the hash check keeps the evidence tied to
+            # the published package.
+            $InstallerEntry = @($Model.Installers)[0]
+            if (-not $InstallerEntry) { throw "${TargetVersion}: manifest declares no installer" }
+            Get-WinGetInstallerEvidence -InstallerUrl ([string]$InstallerEntry['InstallerUrl']) -InstallerSha256 ([string]$InstallerEntry['InstallerSha256']) -Context $TargetVersion | ForEach-Object {
+              # Derived from the object itself, so a fact is added or renamed in one place only.
+              Write-Log -Object ("installer: $(($_.GetEnumerator() | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join ' ')")
 
-                      $ByLocale = @{}
-                      $ByLocale[[string]$Model.DefaultLocalization['PackageLocale']] = $Model.DefaultLocalization
-                      @($Model.Localizations) | ForEach-Object { $ByLocale[[string]$_['PackageLocale']] = $_ }
+              $ByLocale = @{}
+              $ByLocale[[string]$Model.DefaultLocalization['PackageLocale']] = $Model.DefaultLocalization
+              @($Model.Localizations) | ForEach-Object { $ByLocale[[string]$_['PackageLocale']] = $_ }
 
-                      # The signer's legal name is the current name of the entity, so it replaces
-                      # the authored name in the localization that carries it. An unsigned
-                      # installer has no such evidence and must stop the rewrite instead.
-                      $AuthorLocale = $ByLocale[$Evidence.AuthorLocale]
-                      if (-not $AuthorLocale) { throw "${TargetVersion}: no $($Evidence.AuthorLocale) localization in the set" }
-                      if (-not $Fact.Author) { throw "${TargetVersion}: installer '$($Match.Name)' is not signed by a certificate with a common name" }
-                      $PreviousAuthor = [string]$AuthorLocale['Author']
-                      $AuthorLocale['Author'] = $Fact.Author
-                      Write-Log -Object "Author ($($Evidence.AuthorLocale)): '$PreviousAuthor' -> '$($Fact.Author)'"
+              # The signer's legal name is the current name of the entity, so it replaces
+              # the authored name in the localization that carries it. An unsigned
+              # installer has no such evidence and must stop the rewrite instead.
+              $AuthorLocale = $ByLocale[$Evidence.AuthorLocale]
+              if (-not $AuthorLocale) { throw "${TargetVersion}: no $($Evidence.AuthorLocale) localization in the set" }
+              if (-not $_['Author']) { throw "${TargetVersion}: installer '$([IO.Path]::GetFileName($_['Path']))' is not signed by a certificate with a common name" }
+              Write-Log -Object "Author ($($Evidence.AuthorLocale)): '$([string]$AuthorLocale['Author'])' -> '$($_['Author'])'"
+              $AuthorLocale['Author'] = $_['Author']
 
-                      foreach ($LocaleId in $ByLocale.Keys) {
-                        $Locale = $ByLocale[$LocaleId]
-                        if (-not $Locale.Contains('Copyright')) { continue }
-                        if ([string]$Locale['Copyright'] -cne [string]$Fact.LegalCopyright) {
-                          Write-Log -Object "Copyright ($LocaleId): '$($Locale['Copyright'])' -> '$($Fact.LegalCopyright)'"
-                          $Locale['Copyright'] = $Fact.LegalCopyright
-                        }
-                      }
-
-                      # Keep the localization roles as authored: the installer declares en-US, which
-                      # is already the default localization, so neither locale is promoted. Only
-                      # the fields above change.
-                      $PromotedDefault = $Model.DefaultLocalization
-                      $Localizations = @($Model.Localizations | Where-Object { $_ -ne $PromotedDefault })
-
-                      # Keep the installer manifest byte-identical: this change set does not modify
-                      # installer content, and the untouched file also avoids the normalizer
-                      # promoting a shared ProductCode to the manifest root.
-                      Save-WinGetManifest -Manifest (New-WinGetManifestModel -PackageIdentifier $Model.PackageIdentifier -PackageVersion $Model.PackageVersion -Channel $Model.Channel -Moniker ([string]$Model.Moniker) -ManifestVersion $Model.ManifestVersion -InstallerDefaults $Model.InstallerDefaults -Installers $Model.Installers -DefaultLocalization $PromotedDefault -Localizations $Localizations -SourceFormat Memory) -Path $SourcePath -PassThru | Out-Null
-                    }
-                  }
+              foreach ($LocaleId in $ByLocale.Keys) {
+                $Locale = $ByLocale[$LocaleId]
+                if (-not $Locale.Contains('Copyright')) { continue }
+                if ([string]$Locale['Copyright'] -cne [string]$_['LegalCopyright']) {
+                  Write-Log -Object "Copyright ($LocaleId): '$($Locale['Copyright'])' -> '$($_['LegalCopyright'])'"
+                  $Locale['Copyright'] = $_['LegalCopyright']
                 }
               }
             }
-            [IO.File]::WriteAllText((Join-Path $SourcePath "$($Model.PackageIdentifier).installer.yaml"), [string]$RawManifests['Installer'])
 
-            Get-WinGetManifestValidationResult -Path $SourcePath | ForEach-Object {
-              if ($_.HasErrors) { throw "${TargetVersion}: final validation failed:`n$(@($_.Errors | ForEach-Object { "[$($_.Id)] $($_.Message)" }) -join "`n")" }
-              $_.Warnings | ForEach-Object { Write-Log -Object "[$($_.Id)] $($_.Message)" -Level Warning }
+            # Keep the localization roles as authored: the installer declares en-US, which
+            # is already the default localization, so neither locale is promoted. Only
+            # the fields above change.
+            foreach ($PromotedDefault in $Model.DefaultLocalization) {
+              # Keep the installer manifest byte-identical: this change set does not modify
+              # installer content, and the untouched file also avoids the normalizer promoting a
+              # shared ProductCode to the manifest root. Save-WinGetManifest writes the published
+              # text in place of the serialized document and validates the staged set with it.
+              Save-WinGetManifest -Manifest ('PackageIdentifier', 'PackageVersion', 'Channel', 'Moniker', 'ManifestVersion', 'InstallerDefaults', 'Installers' | ForEach-Object -Begin { $Table = @{} } -Process { $Table[$_] = $Model.$_ } -End { $Table } | ForEach-Object { New-WinGetManifestModel @_ -DefaultLocalization $PromotedDefault -Localizations (@($Model.Localizations | Where-Object { $_ -ne $PromotedDefault })) -SourceFormat Memory }) -Path $SourcePath -InstallerManifestYaml ([string]$RawManifests['Installer']) -PassThru | Out-Null
             }
             Write-Log -Object "rewritten: $SourcePath"
           }
