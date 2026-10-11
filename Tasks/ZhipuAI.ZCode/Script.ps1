@@ -7,14 +7,15 @@
 # is staged in a scratch reference repository, and LocalRepoPath points the submission
 # pipeline at that scratch repository so this existing version is its own reference.
 # The change set is the one microsoft/winget-pkgs#445817 asks for: the Chinese
-# localization carries the signer's legal name as the Author, and the localizations that
-# already carry a copyright take the installer's VersionInfo.LegalCopyright. The
-# localization roles stay as authored because the installer declares en-US, which is
-# already the default localization.
+# localization carries the signer's legal name as the Author, the localizations that
+# already carry a copyright take the installer's VersionInfo.LegalCopyright, and the
+# installer URL moves from the retired CDN host to the current one. The localization
+# roles stay as authored because the installer declares en-US, which is already the
+# default localization.
 
 foreach ($TargetVersion in @($Global:DumplingsPreference['TargetVersion'])) {
   if ($TargetVersion) {
-    # The URL and documentation fields are not carried by the installer, so they are left as
+    # The documentation fields are not carried by the installer, so they are left as
     # authored. The Chinese localization carries the signer's legal name; the other localizations
     # keep their authored author strings.
     $Evidence = @{
@@ -29,49 +30,65 @@ foreach ($TargetVersion in @($Global:DumplingsPreference['TargetVersion'])) {
     # state is checked and submitted.
     foreach ($RawManifests in Read-WinGetGitHubManifests 'ZhipuAI.ZCode' $TargetVersion -RepoOwner ($Global:DumplingsPreference['WinGetUpstreamRepoOwner'] ?? 'microsoft') -RepoName ($Global:DumplingsPreference['WinGetUpstreamRepoName'] ?? 'winget-pkgs') -RepoBranch ($Global:DumplingsPreference['WinGetUpstreamRepoBranch'] ?? 'master') -RootPath 'manifests') {
       foreach ($Model in $RawManifests | ConvertFrom-WinGetManifestYaml) {
-        foreach ($ReferenceRoot in Join-Path $env:TEMP ("zcode-reference-" + [guid]::NewGuid().ToString('N'))) {
+        foreach ($ReferenceRoot in Join-Path $env:TEMP ("zcode-reference-$([guid]::NewGuid().ToString('N'))")) {
           foreach ($SourcePath in (, @('Identifier', 'Version' | ForEach-Object { $Model."Package$_" }) | ForEach-Object { Get-WinGetLocalPackagePath @_ -RootPath (Join-Path $ReferenceRoot 'manifests') })) {
             # The installer evidence is read through the shared helper: the manifest records the
             # installer's hash, not its metadata, and the hash check keeps the evidence tied to
-            # the published package.
+            # the published package. The retired CDN host in the published URL no longer resolves
+            # outside China while the current host still serves the same objects, so the evidence
+            # download runs against the migrated URL and the published hash then proves the
+            # migrated object is the published one.
             $InstallerEntry = @($Model.Installers)[0]
             if (-not $InstallerEntry) { throw "${TargetVersion}: manifest declares no installer" }
-            Get-WinGetInstallerEvidence -InstallerUrl ([string]$InstallerEntry['InstallerUrl']) -InstallerSha256 ([string]$InstallerEntry['InstallerSha256']) -Context $TargetVersion | ForEach-Object {
-              # Derived from the object itself, so a fact is added or renamed in one place only.
-              Write-Log -Object ("installer: $(($_.GetEnumerator() | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join ' ')")
+            foreach ($PublishedUrl in [string]$InstallerEntry['InstallerUrl']) {
+              $PublishedUrl -replace '^https://cdn\.zcode-ai\.com/', 'https://cdn-zcode.z.ai/' | ForEach-Object {
+                Get-WinGetInstallerEvidence -InstallerUrl $_ -InstallerSha256 ([string]$InstallerEntry['InstallerSha256']) -Context $TargetVersion | ForEach-Object {
+                  # Derived from the object itself, so a fact is added or renamed in one place only.
+                  Write-Log -Object ("installer: $(($_.GetEnumerator() | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join ' ')")
 
-              $ByLocale = @{}
-              $ByLocale[[string]$Model.DefaultLocalization['PackageLocale']] = $Model.DefaultLocalization
-              @($Model.Localizations) | ForEach-Object { $ByLocale[[string]$_['PackageLocale']] = $_ }
+                  $ByLocale = @{}
+                  $ByLocale[[string]$Model.DefaultLocalization['PackageLocale']] = $Model.DefaultLocalization
+                  @($Model.Localizations) | ForEach-Object { $ByLocale[[string]$_['PackageLocale']] = $_ }
 
-              # The signer's legal name is the current name of the entity, so it replaces
-              # the authored name in the localization that carries it. An unsigned
-              # installer has no such evidence and must stop the rewrite instead.
-              $AuthorLocale = $ByLocale[$Evidence.AuthorLocale]
-              if (-not $AuthorLocale) { throw "${TargetVersion}: no $($Evidence.AuthorLocale) localization in the set" }
-              if (-not $_['Author']) { throw "${TargetVersion}: installer '$([IO.Path]::GetFileName($_['Path']))' is not signed by a certificate with a common name" }
-              Write-Log -Object "Author ($($Evidence.AuthorLocale)): '$([string]$AuthorLocale['Author'])' -> '$($_['Author'])'"
-              $AuthorLocale['Author'] = $_['Author']
+                  # The signer's legal name is the current name of the entity, so it replaces
+                  # the authored name in the localization that carries it. An unsigned
+                  # installer has no such evidence and must stop the rewrite instead.
+                  $AuthorLocale = $ByLocale[$Evidence.AuthorLocale]
+                  if (-not $AuthorLocale) { throw "${TargetVersion}: no $($Evidence.AuthorLocale) localization in the set" }
+                  if (-not $_['Author']) { throw "${TargetVersion}: installer '$([IO.Path]::GetFileName($_['Path']))' is not signed by a certificate with a common name" }
+                  Write-Log -Object "Author ($($Evidence.AuthorLocale)): '$([string]$AuthorLocale['Author'])' -> '$($_['Author'])'"
+                  $AuthorLocale['Author'] = $_['Author']
 
-              foreach ($LocaleId in $ByLocale.Keys) {
-                $Locale = $ByLocale[$LocaleId]
-                if (-not $Locale.Contains('Copyright')) { continue }
-                if ([string]$Locale['Copyright'] -cne [string]$_['LegalCopyright']) {
-                  Write-Log -Object "Copyright ($LocaleId): '$($Locale['Copyright'])' -> '$($_['LegalCopyright'])'"
-                  $Locale['Copyright'] = $_['LegalCopyright']
+                  foreach ($LocaleId in $ByLocale.Keys) {
+                    $Locale = $ByLocale[$LocaleId]
+                    if (-not $Locale.Contains('Copyright')) { continue }
+                    if ([string]$Locale['Copyright'] -cne [string]$_['LegalCopyright']) {
+                      Write-Log -Object "Copyright ($LocaleId): '$($Locale['Copyright'])' -> '$($_['LegalCopyright'])'"
+                      $Locale['Copyright'] = $_['LegalCopyright']
+                    }
+                  }
+                }
+
+                # The migration rewrites the installer URL of the set, so the migrated URL replaces
+                # the published one on the entry as well: the entry is what the task state carries
+                # into the submission, and the staged installer text below carries the same URL.
+                if ($_ -cne $PublishedUrl) {
+                  Write-Log -Object "InstallerUrl: '$PublishedUrl' -> '$_'"
+                  $InstallerEntry['InstallerUrl'] = $_
+                }
+
+                # Keep the localization roles as authored: the installer declares en-US, which
+                # is already the default localization, so neither locale is promoted. Only
+                # the localization fields and the installer URL change.
+                foreach ($PromotedDefault in $Model.DefaultLocalization) {
+                  # Stage the installer manifest from the published text with only the migrated URL
+                  # in place: the rest stays byte-identical, which also avoids the normalizer
+                  # promoting a shared ProductCode to the manifest root. Save-WinGetManifest writes
+                  # the staged text in place of the serialized document and validates the staged
+                  # set with it.
+                  'PackageIdentifier', 'PackageVersion', 'Channel', 'Moniker', 'ManifestVersion', 'InstallerDefaults', 'Installers' | ForEach-Object -Begin { $Table = @{} } -Process { $Table[$_] = $Model.$_ } -End { $Table } | ForEach-Object { New-WinGetManifestModel @_ -DefaultLocalization $PromotedDefault -Localizations (@($Model.Localizations | Where-Object { $_ -ne $PromotedDefault })) -SourceFormat Memory } | Save-WinGetManifest -Path $SourcePath -InstallerManifestYaml ([string]$RawManifests['Installer']).Replace($PublishedUrl, $_) -PassThru | Out-Null
                 }
               }
-            }
-
-            # Keep the localization roles as authored: the installer declares en-US, which
-            # is already the default localization, so neither locale is promoted. Only
-            # the fields above change.
-            foreach ($PromotedDefault in $Model.DefaultLocalization) {
-              # Keep the installer manifest byte-identical: this change set does not modify
-              # installer content, and the untouched file also avoids the normalizer promoting a
-              # shared ProductCode to the manifest root. Save-WinGetManifest writes the published
-              # text in place of the serialized document and validates the staged set with it.
-              Save-WinGetManifest -Manifest ('PackageIdentifier', 'PackageVersion', 'Channel', 'Moniker', 'ManifestVersion', 'InstallerDefaults', 'Installers' | ForEach-Object -Begin { $Table = @{} } -Process { $Table[$_] = $Model.$_ } -End { $Table } | ForEach-Object { New-WinGetManifestModel @_ -DefaultLocalization $PromotedDefault -Localizations (@($Model.Localizations | Where-Object { $_ -ne $PromotedDefault })) -SourceFormat Memory }) -Path $SourcePath -InstallerManifestYaml ([string]$RawManifests['Installer']) -PassThru | Out-Null
             }
             Write-Log -Object "rewritten: $SourcePath"
           }
@@ -82,8 +99,8 @@ foreach ($TargetVersion in @($Global:DumplingsPreference['TargetVersion'])) {
         }
       }
     }
-    # The installers are not part of this change set, but the submission pipeline updates them
-    # from the task state, so declare the installers the reference manifests already carry.
+    # The submission pipeline updates the installers from the task state, so declare the
+    # installer entries the reference manifests carry, with the migrated URL applied.
     $this.CurrentState.Installer = @($Model.Installers)
     $this.CurrentState.Version = $TargetVersion
   } else {
