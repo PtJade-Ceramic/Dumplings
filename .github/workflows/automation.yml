@@ -62,12 +62,15 @@ jobs:
           cache-key: dumplings-playwright-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Dumplings/Modules/PackageModule/Assets/PlaywrightRuntime.psd1') }}
       - name: Run tasks
         # No -EnableWrite and no -EnableMessage in this fork: a run only generates and submits manifests,
-        # it never records task state or sends notifications. The task name is only passed when one is
-        # given, because a blank -Name would swallow the -EnableSubmit switch that follows it.
+        # it never records task state or sends notifications. The model parameters are splatted by name
+        # because a positional splat is bound to the hidden sub-thread parameters of Core/Index.ps1 instead
+        # of reaching its remaining-argument parameter. The task name is only passed when one is given.
         run: |
-          $Arguments = @('-ThrottleLimit', '4', '-EnableSubmit')
-          if (-not [string]::IsNullOrWhiteSpace($env:TASK_NAME)) { $Arguments += @('-Name', $env:TASK_NAME) }
-          $Arguments += @($env:EXTRA_PARAMS -split '\s+' | Where-Object -FilterScript { $_ })
+          $Arguments = @{
+            ThrottleLimit = 4
+            Params        = @('-EnableSubmit') + @($env:EXTRA_PARAMS -split '\s+' | Where-Object -FilterScript { $_ })
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:TASK_NAME)) { $Arguments['Name'] = $env:TASK_NAME }
           .\Core\Index.ps1 @Arguments
         working-directory: Dumplings
         shell: pwsh
