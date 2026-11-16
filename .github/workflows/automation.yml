@@ -9,6 +9,10 @@ on:
         description: Additional parameters passed to the script
         required: false
         type: string
+      name:
+        description: The name of the task to run. Leave blank to run every task
+        required: false
+        type: string
 jobs:
   build:
     name: Build
@@ -58,11 +62,18 @@ jobs:
           cache-key: dumplings-playwright-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Dumplings/Modules/PackageModule/Assets/PlaywrightRuntime.psd1') }}
       - name: Run tasks
         # No -EnableWrite and no -EnableMessage in this fork: a run only generates and submits manifests,
-        # it never records task state or sends notifications.
-        run: .\Core\Index.ps1 -ThrottleLimit 4 -EnableSubmit ${{ github.event.inputs.params }}
+        # it never records task state or sends notifications. The task name is only passed when one is
+        # given, because a blank -Name would swallow the -EnableSubmit switch that follows it.
+        run: |
+          $Arguments = @('-ThrottleLimit', '4', '-EnableSubmit')
+          if (-not [string]::IsNullOrWhiteSpace($env:TASK_NAME)) { $Arguments += @('-Name', $env:TASK_NAME) }
+          $Arguments += @($env:EXTRA_PARAMS -split '\s+' | Where-Object -FilterScript { $_ })
+          .\Core\Index.ps1 @Arguments
         working-directory: Dumplings
         shell: pwsh
         env:
+          TASK_NAME: ${{ github.event.inputs.name }}
+          EXTRA_PARAMS: ${{ github.event.inputs.params }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_DUMPLINGS_TOKEN: ${{ secrets.GH_DUMPLINGS_TOKEN }}
           DUMPLINGS_SECRET: ${{ secrets.DUMPLINGS_SECRET }}
