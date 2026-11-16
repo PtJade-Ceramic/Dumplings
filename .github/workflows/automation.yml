@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       params:
-        description: Additional parameters passed to the script
+        description: Additional parameters passed to the script, e.g. "-TargetVersion 1.2.3 -Force" to resubmit an existing version
         required: false
         type: string
       name:
@@ -65,6 +65,8 @@ jobs:
         # it never records task state or sends notifications. The model parameters are splatted by name
         # because a positional splat is bound to the hidden sub-thread parameters of Core/Index.ps1 instead
         # of reaching its remaining-argument parameter. The task name is only passed when one is given.
+        # Rewriting a version that is older than the recorded state needs -Force: without it the state check
+        # reports Rollbacked and the submission never runs.
         run: |
           $Arguments = @{
             ThrottleLimit = 4
