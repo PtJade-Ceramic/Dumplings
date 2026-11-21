@@ -17,6 +17,21 @@ $Release = Invoke-GitHubApi -Uri 'https://api.github.com/repos/owner/repository/
 
 - **Notes:** Core supplies the normal Dumplings GitHub token. In an independent shell, pass `-Token` or set `$env:GH_DUMPLINGS_TOKEN` before calling the wrapper. It does not fall back to GitHub's unauthenticated 60-request-per-hour allowance. API exceptions include available rate-limit reset, retry, request-ID, and validation details. The wrapper rejects token-bearing requests to non-GitHub origins unless `-AllowNonGitHubUri` is explicit. Keep that override out of ordinary public GitHub tasks.
 
+### `Get-GitHubApiResponseHeader`
+
+- **Owner:** PackageModule, `Libraries\Networking\GitHub.psm1`.
+- **Schema:** `Get-GitHubApiResponseHeader [-Name] <string>`.
+- **Returns:** The values of that header from the most recent `Invoke-GitHubApi` request that passed `-ResponseHeadersVariable`, or nothing when the header was absent.
+- **Use:** Read response metadata that the body does not carry, such as the page count in the `Link` header, instead of walking every page.
+- **Example:**
+
+```powershell
+$null = Invoke-GitHubApi -Uri $Uri -ResponseHeadersVariable Headers
+$LastPage = ConvertFrom-GitHubLinkHeader -Link (Get-GitHubApiResponseHeader -Name 'Link')
+```
+
+- **Notes:** A module function cannot assign `-ResponseHeadersVariable` in its caller's scope, so the wrapper keeps those headers in module state instead. Every request clears that state, so read the headers before the next call. `ConvertFrom-GitHubLinkHeader` turns the `Link` header into the last page number, which reaches the oldest commit of a path in two requests because GitHub lists commits newest first.
+
 ### `Join-Uri`
 
 - **Owner:** PackageModule, `Libraries\Networking\Web.psm1`.
