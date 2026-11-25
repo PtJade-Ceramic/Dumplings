@@ -95,7 +95,6 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
 
 $GuestScriptSource = Join-Path $PSScriptRoot 'Get-WinGetVMInstalledState.ps1'
-$GuestWaitScriptSource = Join-Path $PSScriptRoot 'Wait-WinGetVMProcess.ps1'
 
 function Import-DumplingsHyperVModule {
   Import-Module Hyper-V -PassThru
@@ -137,10 +136,9 @@ function Copy-DumplingsCollectorToVM {
   $GuestScriptPath = Join-Path $GuestDirectory 'Get-WinGetVMInstalledState.ps1'
   # Stage observation tools only. Installer and application execution remain
   # explicit agent actions between installed-state captures.
-  foreach ($Source in @($GuestScriptSource, $GuestWaitScriptSource)) {
-    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { throw "Guest validation script not found: $Source" }
-    $Destination = Join-Path $GuestDirectory (Split-Path -Path $Source -Leaf)
-    Copy-VMFile -VMName $VMName -SourcePath $Source -DestinationPath $Destination -FileSource Host -CreateFullPath -Force
+  @($GuestScriptSource, (Join-Path $PSScriptRoot 'Wait-WinGetVMProcess.ps1')) | ForEach-Object {
+    if (-not (Test-Path -LiteralPath $_ -PathType Leaf)) { throw "Guest validation script not found: $_" }
+    Copy-VMFile -VMName $VMName -SourcePath $_ -DestinationPath (Join-Path $GuestDirectory (Split-Path -Path $_ -Leaf)) -FileSource Host -CreateFullPath -Force
   }
   return $GuestScriptPath
 }
