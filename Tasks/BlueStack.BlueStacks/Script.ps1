@@ -403,6 +403,10 @@ if ($TargetVersion -and $Status -notmatch 'New|Changed|Updated') {
 }
 
 if ($Status -match 'New|Changed|Updated') {
+  # The locale documents this run authors: the published set of a targeted rewrite, and every
+  # language the download article serves otherwise.
+  $AuthoredTags = $TargetVersion ? @(@($AlignedLocale.Values) + $AddedLocale | Sort-Object -Unique) : $LiveLocale
+
   # Copyright
   # The statement is the installer's own localized text, so it is read from the installer rather
   # than carried over from the previous version: the submission pipeline moves the year of an
@@ -466,7 +470,7 @@ if ($Status -match 'New|Changed|Updated') {
         Remove-Item -LiteralPath $CopyrightExtractPath -Recurse -Force -ErrorAction Ignore
       }
 
-      foreach ($LocaleTag in $TargetVersion ? @(@($AlignedLocale.Values) + $AddedLocale | Sort-Object -Unique) : $LiveLocale) {
+      foreach ($LocaleTag in $AuthoredTags) {
         # The installer names a language and a region, while a locale document may name only the
         # language, so an exact tag is preferred and a single regional file is the fallback.
         $Language = @($InstallerCopyright.Keys | Where-Object -FilterScript { $_ -ceq $LocaleTag })
@@ -485,6 +489,74 @@ if ($Status -match 'New|Changed|Updated') {
       }
     } catch {
       $this.Log("Failed to read the copyright statement from the installer: ${_}", 'Warning')
+    }
+  }
+
+  # Publisher metadata
+  # The publisher states the product tagline of each language on the marketing site, and the download
+  # page lists one locale of it per language. The localized download page of a language is not
+  # translated, so the tagline is read from the landing page next to it, which declares the language
+  # it is written in; the English page is the download page itself, because the site answers the
+  # default locale with its Chinese landing page. The other fields do not depend on the language.
+  $MarketingDownloadPage = Get-BlueStacksPageContent -Uri 'https://www.bluestacks.com/download.html' | ConvertFrom-Html
+  $MarketingTagline = @(
+    [pscustomobject]@{
+      Language    = $MarketingDownloadPage.SelectSingleNode('//html')?.GetAttributeValue('lang', '')
+      Description = [System.Net.WebUtility]::HtmlDecode($MarketingDownloadPage.SelectSingleNode('//meta[@name="description"]')?.GetAttributeValue('content', '' ) ?? '').Trim()
+    }
+    $MarketingDownloadPage.SelectNodes('//link[@rel="alternate"][@href][@hreflang]') | Where-Object -FilterScript { $_.GetAttributeValue('hreflang', '') -cne 'x-default' } | ForEach-Object {
+      $MarketingUrl = $_.GetAttributeValue('href', '') -replace '/download\.html$', '/index.html'
+      try {
+        $MarketingPage = Get-BlueStacksPageContent -Uri $MarketingUrl | ConvertFrom-Html
+        $MarketingLanguage = $MarketingPage.SelectSingleNode('//html')?.GetAttributeValue('lang', '')
+        $MarketingDescription = [System.Net.WebUtility]::HtmlDecode($MarketingPage.SelectSingleNode('//meta[@name="description"]')?.GetAttributeValue('content', '') ?? '').Trim()
+        if ([string]::IsNullOrWhiteSpace($MarketingLanguage) -or [string]::IsNullOrWhiteSpace($MarketingDescription)) { return }
+        [pscustomobject]@{
+          Language    = $MarketingLanguage
+          Description = $MarketingDescription
+        }
+      } catch {
+        $this.Log("Failed to read the marketing page ${MarketingUrl}: ${_}", 'Warning')
+      }
+    }
+  )
+
+  $PublisherLocale = [ordered]@{
+    Publisher           = 'BlueStack Systems, Inc.'
+    PublisherUrl        = 'https://www.bluestacks.com/'
+    PublisherSupportUrl = 'https://support.bluestacks.com/'
+    PrivacyUrl          = 'https://www.bluestacks.com/terms-and-privacy.html#privacy'
+    Author              = 'BlueStack Systems, Inc.'
+    PackageName         = 'BlueStacks'
+    PackageUrl          = 'https://www.bluestacks.com/download.html'
+    License             = 'Proprietary'
+    LicenseUrl          = 'https://www.bluestacks.com/terms-and-privacy.html#terms'
+    CopyrightUrl        = 'https://www.bluestacks.com/copyright-dispute-policy.html'
+  }
+  $PublisherLocale.Keys | ForEach-Object {
+    $this.CurrentState.Locale += [ordered]@{
+      Key   = $_
+      Value = $PublisherLocale[$_]
+    }
+  }
+
+  foreach ($AuthoredTag in $AuthoredTags) {
+    # The marketing page names a script or a region where a locale document names only the
+    # language, so an exact tag is preferred and a single language is the fallback.
+    $Tagline = @($MarketingTagline | Where-Object -FilterScript { $_.Language -ieq $AuthoredTag })
+    if ($Tagline.Count -eq 0) {
+      $Tagline = @($MarketingTagline | Where-Object -FilterScript { ($_.Language -split '-')[0] -ieq ($AuthoredTag -split '-')[0] })
+    }
+    if ($Tagline.Count -ne 1) {
+      $this.Log("The marketing site states no single tagline for the ${AuthoredTag} locale", 'Verbose')
+      continue
+    }
+    'ShortDescription', 'Description' | ForEach-Object {
+      $this.CurrentState.Locale += [ordered]@{
+        Locale = $AuthoredTag
+        Key    = $_
+        Value  = $Tagline[0].Description
+      }
     }
   }
 }
