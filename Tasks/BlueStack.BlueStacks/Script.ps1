@@ -36,10 +36,19 @@ function Get-BlueStacksPageContent {
     [string]$Uri
   )
 
-  try {
-    return (Invoke-WebRequest -Uri $Uri -ErrorAction Stop).Content
-  } catch {
-    return (Invoke-PlaywrightFetch -Uri $Uri -Headless -Stealth -WaitUntil Load).Content
+  # A plain request is retried once: a transient error is far more likely than the publisher blocking
+  # the client, and the browser lease is the expensive fallback.
+  for ($Attempt = 1; ; $Attempt++) {
+    try {
+      # The archived copies answer more slowly than the publisher, so the shared 15 second limit is
+      # raised here instead of failing over to the browser lease.
+      return (Invoke-WebRequest -Uri $Uri -OperationTimeoutSeconds 45 -ErrorAction Stop).Content
+    } catch {
+      if ($Attempt -ge 2) {
+        return (Invoke-PlaywrightFetch -Uri $Uri -Headless -Stealth -WaitUntil Load).Content
+      }
+      Start-Sleep -Seconds 2
+    }
   }
 }
 
@@ -362,7 +371,7 @@ foreach ($Page in $LocalizedPages) {
 
       $ReleaseNotes = $ReleaseNotesNodes | Get-TextContent | Format-Text
       # The schema bounds the field, so an entry longer than that is not attributable to one build.
-      if ($ReleaseNotes -and $ReleaseNotes.Length -le 10000) {
+      if ($ReleaseNotes -and $ReleaseNotes.Length -le [int](Get-WinGetManifestSchema -ManifestType locale -Raw).properties.ReleaseNotes.maxLength) {
         $Note = [pscustomobject]@{
           ReleaseNotes = $ReleaseNotes
           ReleaseTime  = $NoteReleaseTime
@@ -421,7 +430,9 @@ if ($Status -match 'New|Changed|Updated') {
     try {
       $CopyrightInstallerUrl = $CopyrightInstaller.InstallerUrl
       if (-not $this.InstallerFiles[$CopyrightInstallerUrl]) {
-        $this.InstallerFiles[$CopyrightInstallerUrl] = Get-TempFile -Uri $CopyrightInstallerUrl
+        # The installment artifact is hundreds of megabytes, so it is read through the package's own
+        # downloader instead of a plain web request, which caps one operation at the configured timeout.
+        $this.InstallerFiles[$CopyrightInstallerUrl] = (Invoke-WinGetInstallerDownload -Uri $CopyrightInstallerUrl -DestinationPath (New-TempFile)).DestinationPath
       }
       $CopyrightInstallerFile = $this.InstallerFiles[$CopyrightInstallerUrl]
 
@@ -493,30 +504,68 @@ if ($Status -match 'New|Changed|Updated') {
   }
 
   # Publisher metadata
-  # The publisher states the product tagline of each language on the marketing site, and the download
-  # page lists one locale of it per language. The localized download page of a language is not
-  # translated, so the tagline is read from the landing page next to it, which declares the language
-  # it is written in; the English page is the download page itself, because the site answers the
-  # default locale with its Chinese landing page. The other fields do not depend on the language.
-  $MarketingDownloadPage = Get-BlueStacksPageContent -Uri 'https://www.bluestacks.com/download.html' | ConvertFrom-Html
+  # The default language is captured at the site root. The root answers with the Chinese page today,
+  # so the download page stands in for it when the archive has no capture.
   $MarketingTagline = @(
-    [pscustomobject]@{
-      Language    = $MarketingDownloadPage.SelectSingleNode('//html')?.GetAttributeValue('lang', '')
-      Description = [System.Net.WebUtility]::HtmlDecode($MarketingDownloadPage.SelectSingleNode('//meta[@name="description"]')?.GetAttributeValue('content', '' ) ?? '').Trim()
-    }
-    $MarketingDownloadPage.SelectNodes('//link[@rel="alternate"][@href][@hreflang]') | Where-Object -FilterScript { $_.GetAttributeValue('hreflang', '') -cne 'x-default' } | ForEach-Object {
-      $MarketingUrl = $_.GetAttributeValue('href', '') -replace '/download\.html$', '/index.html'
-      try {
-        $MarketingPage = Get-BlueStacksPageContent -Uri $MarketingUrl | ConvertFrom-Html
-        $MarketingLanguage = $MarketingPage.SelectSingleNode('//html')?.GetAttributeValue('lang', '')
-        $MarketingDescription = [System.Net.WebUtility]::HtmlDecode($MarketingPage.SelectSingleNode('//meta[@name="description"]')?.GetAttributeValue('content', '') ?? '').Trim()
-        if ([string]::IsNullOrWhiteSpace($MarketingLanguage) -or [string]::IsNullOrWhiteSpace($MarketingDescription)) { return }
+    foreach (
+      $TaglinePage in @(
         [pscustomobject]@{
-          Language    = $MarketingLanguage
-          Description = $MarketingDescription
+          ArchiveUrl = 'https://www.bluestacks.com/'
+          LiveUrl    = 'https://www.bluestacks.com/download.html'
+        }
+        (Get-BlueStacksPageContent -Uri 'https://www.bluestacks.com/download.html' | ConvertFrom-Html).SelectNodes('//link[@rel="alternate"][@href][@hreflang]') | Where-Object -FilterScript { $_.GetAttributeValue('hreflang', '') -cne 'x-default' } | ForEach-Object -Process {
+          $_.GetAttributeValue('href', '') -replace '/download\.html$', '/index.html' | ForEach-Object {
+            [pscustomobject]@{
+              ArchiveUrl = $_
+              LiveUrl    = $_
+            }
+          }
+        }
+      )
+    ) {
+      $SourceUri = $TaglinePage.LiveUrl
+      $Archived = $false
+      try {
+        # The archive answers with an empty set when it holds no capture near the date, and reading a
+        # property it does not have is an error under the strict mode the runner enables.
+        $SnapshotProperty = (
+          Get-BlueStacksPageContent -Uri "https://archive.org/wayback/available?url=$([Uri]::EscapeDataString($TaglinePage.ArchiveUrl))&timestamp=$(
+            # The marketing tagline is marketing copy, so it belongs to the release it shipped with rather
+            # than to the site as it reads today. The archived copy of each language's page closest to the
+            # release date therefore supplies it, and the live page is only a fallback for a page the archive
+            # never captured. A page states the language it is written in, so nothing is translated here. The
+            # remaining fields below do not depend on the language or the release, and they are the values the
+            # publisher states for the package as a whole.
+            # The archive lookup takes the timestamp as yyyyMMdd. The state holds the release date as
+            # yyyy-MM-dd, and a run whose state carries no such date looks up the capture nearest today.
+            switch ($this.CurrentState['ReleaseTime']) {
+              { $_ -is [datetime] } { $_.ToString('yyyyMMdd'); break }
+              { $_ -is [datetimeoffset] } { $_.Date.ToString('yyyyMMdd'); break }
+              default { foreach ($TaglineParsedDate in [datetime]::MinValue) { [datetime]::TryParseExact([string]$_, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$TaglineParsedDate) ? $TaglineParsedDate.ToString('yyyyMMdd') : (Get-Date).ToString('yyyyMMdd') } }
+            }
+          )" | ConvertFrom-Json).archived_snapshots.PSObject.Properties['closest']
+        $Snapshot = $SnapshotProperty ? $SnapshotProperty.Value : $null
+        if ($Snapshot -and $Snapshot.available) {
+          # The id_ form returns the page as it was, without the archive's own banner.
+          $SourceUri = "https://web.archive.org/web/$($Snapshot.timestamp)id_/$($TaglinePage.ArchiveUrl)"
+          $Archived = $true
         }
       } catch {
-        $this.Log("Failed to read the marketing page ${MarketingUrl}: ${_}", 'Warning')
+        $this.Log("Failed to look up the archived copy of $($TaglinePage.ArchiveUrl): ${_}", 'Verbose')
+      }
+
+      try {
+        $SourcePage = Get-BlueStacksPageContent -Uri $SourceUri | ConvertFrom-Html
+        $TaglineLanguage = $SourcePage.SelectSingleNode('//html')?.GetAttributeValue('lang', '')
+        $TaglineDescription = [System.Net.WebUtility]::HtmlDecode($SourcePage.SelectSingleNode('//meta[@name="description"]')?.GetAttributeValue('content', '') ?? '').Trim()
+        if ([string]::IsNullOrWhiteSpace($TaglineLanguage) -or [string]::IsNullOrWhiteSpace($TaglineDescription)) { continue }
+        [pscustomobject]@{
+          Language    = $TaglineLanguage
+          Description = $TaglineDescription
+          Archived    = $Archived
+        }
+      } catch {
+        $this.Log("Failed to read the marketing page ${SourceUri}: ${_}", 'Warning')
       }
     }
   )
@@ -551,11 +600,21 @@ if ($Status -match 'New|Changed|Updated') {
       $this.Log("The marketing site states no single tagline for the ${AuthoredTag} locale", 'Verbose')
       continue
     }
+    # The schema bounds the short description, so a tagline that exceeds it is cut at a sentence or
+    # word boundary instead of being dropped: the platform requires the field for the default locale.
+    $TaglineValue = $Tagline[0].Description
+    $ShortDescription = $TaglineValue
+    $ShortDescriptionLimit = [int](Get-WinGetManifestSchema -ManifestType locale -Raw).properties.ShortDescription.maxLength
+    if ($ShortDescription.Length -gt $ShortDescriptionLimit) {
+      $WithinLimit = $ShortDescription.Substring(0, $ShortDescriptionLimit)
+      $SentenceEnd = [regex]::Match($WithinLimit, '^.*[.!?]\s').Value.Trim()
+      $ShortDescription = $SentenceEnd ? $SentenceEnd : $WithinLimit.LastIndexOf(' ') -gt 0 ? $WithinLimit.Substring(0, $WithinLimit.LastIndexOf(' ')).Trim() : $WithinLimit.Trim()
+    }
     'ShortDescription', 'Description' | ForEach-Object {
       $this.CurrentState.Locale += [ordered]@{
         Locale = $AuthoredTag
         Key    = $_
-        Value  = $Tagline[0].Description
+        Value  = $_ -ceq 'ShortDescription' ? $ShortDescription : $TaglineValue
       }
     }
   }
